@@ -5,6 +5,10 @@
 # one long runlabel in an entry, end it with a comma, as shown in the
 # 'hellolong3' entry below.
 # 
+# location of socket
+:::initstat:t/init.s
+# location of status file
+:::initstat:t/initstat
 hellogrp:hello1:1:wait:/bin/echo "hello world!" > t/out
 hellogrp:hello2:2:respawn:/bin/echo "hello world!" >> t/out
 hellogrp:hello3:3:wait:/bin/sleep 5; cat /dev/null > t/out
@@ -18,3 +22,6 @@ foogrp:foo3:3:once:/bin/echo foo3 >t/out
 bargrp:bar1:1:once:/bin/echo bar1start >t/out;sleep 6;/bin/echo bar1end >t/out
 bazgrp:baz1:1:once:sleep 12; /bin/echo baz1 > t/out
 scramjet:scram1:1:wait:date > t/out
+hellogrp:test1:f:test:/bin/true
+hellogrp:test2:f:test:/bin/false
+hellogrp:test3:t:test:/bin/true

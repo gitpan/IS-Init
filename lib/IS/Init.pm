@@ -3,12 +3,18 @@ use strict;
 use IO::Socket;
 use IO::Select;
 use POSIX qw(:signal_h :errno_h :sys_wait_h);
+use Data::Dump qw(dump);
 
-my $debug=0;
+my $debug=$ENV{DEBUG} || 0;
+
+sub debug
+{
+  warn @_ if $debug;
+}
 
 BEGIN {
 	use vars qw ($VERSION);
-	$VERSION     = 0.92;
+	$VERSION     = 0.93;
 }
 
 =head1 NAME
@@ -79,6 +85,7 @@ configuration file and to the socket, like this:
   my $init = new IS::Init (
       'config' => '/etc/isinittab',
       'socket' => '/var/run/is/init.s'
+      'initstat' => '/var/run/is/initstat'
 			  );
 
 =cut
@@ -86,7 +93,9 @@ configuration file and to the socket, like this:
   my %parms=@_;
   
   $self->{'config'} = $parms{'config'} || "/etc/isinittab";
-  $self->{'socket'} = $parms{'socket'} || "/var/run/is/init.s";
+  $self->{'socket'} = "/var/run/is/init.s";
+  $self->_config();
+  $self->{'socket'} = $parms{'socket'} if $parms{'socket'};
 
   ($self->{'group'}, $self->{'level'}) = ("NULL", "NULL");
 
@@ -123,9 +132,61 @@ sub tell
 {
   my ($self,$group,$runlevel)=@_;
   my $socket = $self->_open_socket() || die $!;
-  print $socket "$group $runlevel";
+  print $socket "$group $runlevel\n";
   close($socket);
   1;
+}
+
+sub status
+{
+  my $self=shift;
+  my %parm = @_;
+  my $group = $parm{'group'} if $parm{'group'};
+  my $level = $parm{'level'} if $parm{'level'};
+  my $initstat = $parm{'initstat'} if $parm{'initstat'};
+  # allow this to be called as IS::Init->status(...)
+  $self=bless({},$self) unless ref($self);
+  $self->{'initstat'} = $initstat if $initstat;
+  return "" unless $self->{'initstat'} && -f $self->{'initstat'};
+  my $startid="start";
+  my $endid="end";
+  my $out;
+  do
+  {
+    $out ="";
+    open(STATUS,"<$self->{'initstat'}") || die $!;
+    while(<STATUS>)
+    {
+      if (/^!startid (.*)/)
+      {
+	$startid = $1;
+	next;
+      }
+      next if $startid eq "start";
+      if (/^!endid (.*)/)
+      {
+	$endid = $1;
+	last;
+      }
+      my ($sgroup,$state,$slevel) = split;
+      next unless $state;
+      if ($group)
+      {
+	next if $group ne $sgroup;
+	s/^\S+\s+(.*?)\s*$/$1/;
+	chomp;
+      }
+      if ($level)
+      {
+	next if $level ne $slevel;
+	s/^(\S+)\s+.*$/$1/;
+	chomp;
+      }
+      $out .= $_;
+    }
+
+  } while $startid ne $endid;
+  return $out;
 }
 
 sub stopall
@@ -137,19 +198,6 @@ sub stopall
   1;
 }
 
-
-=head1 PRIVATE METHODS
-
-These methods and functions are considered private and are intended for
-internal use by this module. They are B<not> considered part of the public
-interface and are described here for documentation purposes only.
-
-
-=cut
-
-=head2 _open_socket
-
-=cut
 
 sub _open_socket
 {
@@ -179,87 +227,196 @@ sub _start_daemon
       while(my $client = $server->accept())
       {
 	$SIG{CHLD} = 'IGNORE';
-	# warn "reading\n";
+	debug "reading\n";
 	my $data=<$client>;
 	$data="" unless $data;
-	# warn "$data\n" if $data;
-	# warn "done reading\n";
+	chomp($data=$data);
+	debug "$data\n" if $data;
+	debug "done reading, got: $data\n";
 	$self->_stopall() if $data =~ /^stopall/;
 	my ($group,$level) = split(' ',$data);
 	$self->_spawn($group,$level);
 	$self->_sigchld();
+	close($client);
       }
-      # warn "restarting socket";
+      debug "restarting socket\n";
     }
   }
 
-  # warn "IS::Init daemon started as PID $child\n"; 
+  debug "IS::Init daemon started as PID $child\n"; 
 
   sleep 1;
   return $child;
 }
 
+sub _status
+{
+  my ($self,$group,$level,$state) = @_;
+  $level = $self->{'status'}{$group}{'level'} unless $level;
+  $self->{'status'}{$group}{'level'}=$level;
+  $self->{'status'}{$group}{'state'}=$state;
+  return "" unless $self->{'initstat'};
+  # fetch all groups in inittab
+  my @group;
+  for my $tag (keys %{$self->{'inittab'}{'group'}})
+  {
+    my $group = $self->{'inittab'}{'group'}{$tag};
+    push @group, $group unless grep /^$group$/, @group;
+  }
+  # add the groups in status, just in case
+  for my $group (keys %{$self->{'status'}})
+  {
+    push @group, $group unless grep /^$group$/, @group;
+  }
+  my $id = rand();
+  open(STATUS,">$self->{'initstat'}") || die $!;
+  print STATUS "!startid $id\n";
+  # for my $group (keys %{$self->{'status'}})
+  for my $group (sort @group)
+  {
+    next if $group eq "NULL";
+    debug "storing status for $group\n";
+    my $state = $self->{'status'}{$group}{'state'} || "stopped";
+    my $level = $self->{'status'}{$group}{'level'} || "";
+    printf STATUS ("%-15s %-15s %-15s\n", $group, $state, $level);
+  }
+  print STATUS "!endid $id\n";
+  # print STATUS dump($self);
+  close STATUS;
+}
+
 sub _stopall
 {
   my $self=shift;
+  for my $group (keys %{$self->{'status'}})
+  {
+    $self->_status($group,'',"stopping");
+  }
   for my $tag (keys %{$self->{'pid'}})
   {
     $self->_kill($tag);
   }
+  for my $group (keys %{$self->{'status'}})
+  {
+    $self->_status($group,'',"stopped");
+  }
   exit(0);
 }
 
-sub _spawn
+sub _config
 {
-  my ($self,$newgroup,$newlevel)=@_;
-  ($newgroup,$newlevel)=($self->{'group'},$self->{'level'})
-    unless $newgroup && ($newlevel || (defined($newlevel) && $newlevel == 0));
-  ($self->{'group'},$self->{'level'}) = ($newgroup,$newlevel);
-  my @activetags;
+  my $self=shift;
+  $self->{'inittab'}={};
   open(INITTAB,"<$self->{'config'}") || die $!;
   while(<INITTAB>)
   {
     next if /^#/;
+    next if /^\s*$/;
     chomp;
     my ($group,$tag,$level,$mode,$cmd) = split(':',$_,5);
-    $self->{'mode'}{$tag} = $mode;
+    debug "inittab $group|$tag|$level|$mode|$cmd\n";
+    if ($mode eq "socket")
+    {
+      $self->{'socket'} = $cmd;
+      next;
+    }
+    if ($mode eq "initstat")
+    {
+      $self->{'initstat'} = $cmd;
+      next;
+    }
+    next if /^:::/;
+    $self->{'inittab'}{'group'}{$tag} = $group;
+    my @level;
+    if ($level =~/,/)
+    {
+      @level = split(',',$level);
+      debug dump(@level). "\n";
+    }
+    else
+    {
+      @level = split('',$level);
+    }
+    debug "final levels @level\n";
+    $self->{'inittab'}{'levels'}{$tag} = \@level;
+    $self->{'inittab'}{'mode'}{$tag} = $mode;
+    $self->{'inittab'}{'cmd'}{$tag} = $cmd;
+  }
+}
+
+# starts and stops processes according to new runlevel
+sub _spawn
+{
+  my ($self,$newgroup,$newlevel)=@_;
+  ($newgroup,$newlevel)=($self->{'group'},$self->{'level'})
+  unless $newgroup && ($newlevel || (defined($newlevel) && $newlevel == 0));
+  ($self->{'group'},$self->{'level'}) = ($newgroup,$newlevel);
+  $self->_status($newgroup,$newlevel,"start");
+  $self->_config();
+  my @activetags;
+  my $testres="";
+  for my $tag (keys %{$self->{'inittab'}{'group'}})
+  {
+    debug "checking $tag\n"; 
+    my $group=$self->{'inittab'}{'group'}{$tag};
+    my @level=@{$self->{'inittab'}{'levels'}{$tag}};
+    my $mode=$self->{'inittab'}{'mode'}{$tag};
+    my $cmd=$self->{'inittab'}{'cmd'}{$tag};
     next if $mode eq "off";
     push @activetags, $tag;
     next unless $group eq $newgroup;
 
-    if(
-	($level =~ /,/ && $level =~ /(^|,)$newlevel(,|$)/) ||
-	($level !~ /,/ && $level =~ /$newlevel/) 
-      )
+    debug "$group $tag has levels @level\n";
+
+    # if this line is for our newly commanded runlevel
+    if(grep /^$newlevel$/, @level)
     {
       # start processes in new runlevel
-      # warn "$level contains $newlevel";
+      debug "starting $newgroup $newlevel\n";
 
-      # bail if already started
+      # bail if already started in another runlevel
       next if $self->{'pid'}{$tag};
 
       if ($mode eq "wait")
       {
 	# set a placeholder to keep us from running $tag again
 	$self->{'pid'}{$tag} = "wait";
-	# warn "system($cmd)";
+	debug "wait system($cmd)\n";
+	# XXX process start
 	system($cmd);
+	next;
+      }
+
+      if ($mode eq "test")
+      {
+	# set a placeholder to keep us from running $tag again
+	$self->{'pid'}{$tag} = "test";
+	debug "test system($cmd)\n";
+	# XXX process start
+	system($cmd);
+	my $rc = $? >> 8;
+	$testres = "fail"  if $rc;
 	next;
       }
 
       if ($mode eq "respawn")
       {
+	# start timing and counting
 	$self->{'time'}{$tag}=time() unless $self->{'time'}{$tag};
 	$self->{'counter'}{$tag}=0 unless $self->{'counter'}{$tag};
 	if($self->{'time'}{$tag} < time() - 10)
 	{
+	  # it's been a while; restarting timing and counting
 	  $self->{'time'}{$tag}=time(); 
 	  $self->{'counter'}{$tag}=0;
 	}
+	# skip this inittab entry if we're in jail
 	next unless time() >= $self->{'time'}{$tag};
+	# let it respawn no more than 5 times in 10 seconds
 	if ($self->{'counter'}{$tag} >= 5)
 	{
 	  warn "$0: $tag respawning too rapidly -- sleeping 60 seconds\n";
+	  # go to jail 
 	  $self->{'time'}{$tag}=time() + 60; 
 	  $self->{'counter'}{$tag}=0;
 	  next;
@@ -267,20 +424,21 @@ sub _spawn
 	$self->{'counter'}{$tag}++;
       }
 
+      # we only get here if tag is respawn or once
       if (my $pid = fork())
       {
 	# parent
-	# warn "$pid forked\n";
+	debug "$pid forked\n";
 	# build index so we can find pid from tag
 	$self->{'pid'}{$tag} = $pid;
 	# build reverse index so we can find tag from pid
 	$self->{'tag'}{$self->{'pid'}{$tag}}=$tag;
 	next;
       }
-
       # child
       # sleep 1;
-      # warn "exec $cmd";
+      debug "exec $cmd\n";
+      # XXX process start
       exec($cmd);
     }
     else
@@ -291,7 +449,6 @@ sub _spawn
     }
 
   }
-  close(INITTAB);
 
   # stop processes which are no longer in inittab
   for my $tag (keys %{$self->{'pid'}})
@@ -300,19 +457,26 @@ sub _spawn
     $self->_kill($tag);
   }
 
+  my $state = $testres || "run";
+  $self->_status($newgroup,$newlevel,$state);
 }
 
 sub _kill
 {
   my $self = shift;
   my $tag = shift;
-  if ($self->{'pid'}{$tag} eq "wait")
+  if 
+  (
+    $self->{'pid'}{$tag} eq "wait" ||
+    $self->{'pid'}{$tag} eq "test"
+  )
   {
     delete $self->{'pid'}{$tag};
     return;
   }
   return unless $self->{'pid'}{$tag};
-  # warn "killing $self->{'pid'}{$tag}";
+  debug "killing $self->{'pid'}{$tag}\n";
+  # XXX process kill start
   kill(15,$self->{'pid'}{$tag});
   for(my $i=1;$i <= 16; $i*=2)
   {
@@ -321,7 +485,15 @@ sub _kill
     sleep $i;
   }
   return unless $self->{'pid'}{$tag};
-  kill(9,$self->{'pid'}{$tag});
+  while(kill(0,$self->{'pid'}{$tag}))
+  {
+    # XXX process kill hard
+    debug "hard kill $self->{'pid'}{$tag}\n";
+    kill(9,$self->{'pid'}{$tag});
+  }
+  # XXX process kill done
+  debug "killed $self->{'pid'}{$tag}\n";
+
   delete $self->{'pid'}{$tag};
 }
 
@@ -342,16 +514,14 @@ sub _sigchld
     return;
   }
   # $pid exited
-  # warn "$pid exited\n";
+  debug "$pid exited\n";
+  # XXX pid exited (do we get here for every kill?  what about system()?)
   my $tag = $self->{'tag'}{$pid};
-  delete $self->{'pid'}{$tag} if $self->{'mode'}{$tag} eq 'respawn';
+  # why not just always delete $self->{'pid'}{$tag} here?
+  delete $self->{'pid'}{$tag} if $self->{'inittab'}{'mode'}{$tag} eq 'respawn';
+  # reread isinittab
   $self->_spawn();
   $SIG{CHLD} = sub {$self->_sigchld()};
-}
-
-sub debug
-{
-  warn @_ if $debug;
 }
 
 =head1 BUGS

@@ -4,7 +4,7 @@ use Test;
 require "t/utils.pl";
 
 # BEGIN { plan tests => 14, todo => [3,4] }
-BEGIN { plan tests => 9 }
+BEGIN { plan tests => 11 }
 
 use IS::Init;
 
@@ -30,10 +30,12 @@ sleep 1;
 ok(lines(),1);
 $init->tell("hellogrp","3");
 sleep 1;
+ok($init->status(group=>"hellogrp",level=>"3"),"start");
 ok(lines(),1);
 sleep 3;
 ok(lines(),1);
 sleep 3;
+ok($init->status(group=>"hellogrp",level=>"3"),"run");
 ok(lines(),0);
 print `cat t/out`;
 $init->tell("hellogrp",1);

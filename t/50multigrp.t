@@ -48,20 +48,3 @@ ok(lastline(),"baz1");
 $init->stopall();
 ok(1);
 
-__END__
-$init->tell("hellogrp","3");
-sleep 1;
-ok(lines(),1);
-sleep 3;
-ok(lines(),1);
-sleep 3;
-ok(lines(),0);
-$init->tell("hellogrp",1);
-sleep 1;
-ok(lines(),1);
-`cat /dev/null > t/out`;
-ok(lines(),0);
-$init->tell("hellogrp",1);
-sleep 1;
-ok(lines(),0);
-

@@ -1,3 +1,12 @@
+2003-01-18 23:27  stevegt
+
+	* lib/IS/Init.pm, t/isinittab.master: add test mode
+
+2003-01-18 22:41  stevegt
+
+	* lib/IS/Init.pm, t/20wait.t, t/40respawn.t, t/50multigrp.t,
+	t/isinittab.master: add status file output
+
 2001-09-21 12:07  stevegt
 
 	* lib/IS/Init.pm: port to AIX

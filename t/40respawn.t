@@ -43,6 +43,7 @@ ok(sub{return 1 if $pid != $newpid},1);
 ok(lines(),0);
 warn "\n'respawning too rapidly' message is normal:\n";
 $init->tell("hellogrp",2);
+sleep 1 while(lines() < 5);
 sleep 5;
 ok(lines(),5);
 
